@@ -1,6 +1,7 @@
 #include <ArduinoJson.h>
 #include <ETH.h>
 #include <WebServer.h>
+#include <Preferences.h>
 #include <driver/timer.h>
 #include "esp_system.h"
 #include "rom/ets_sys.h"
@@ -75,6 +76,7 @@
 
 // #define USE_WATCHDOG
 // #define USE_WIEGAND
+#define USE_WEBSERVICE
 
 hw_timer_t *timer = NULL;  // Define the timer handle
 volatile SemaphoreHandle_t timerSemaphore;
@@ -84,6 +86,12 @@ hw_timer_t *wdt_timer = NULL; // Define the watchdog timer handle
 // Flag to track Ethernet connection status
 bool eth_connected = false;
 uint32_t chipId = 0;
+
+#ifdef USE_WEBSERVICE
+// create a server instance on port 80
+WebServer server(80);
+#endif
+Preferences preferences;
 
 #ifdef USE_WATCHDOG
 void ARDUINO_ISR_ATTR resetModule() {
@@ -243,6 +251,45 @@ void GetMacAddress(void)
   Serial.println(getInterfaceMacAddress(ESP_MAC_ETH));
 }
 
+
+void handleGet() {
+  StaticJsonDocument<200> doc;
+  doc["message"] = "Hello from ESP32";
+  doc["status"] = "success";
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handlePost() {
+  if (server.hasArg("plain")) {
+      String rawMessage = server.arg("plain");
+      Serial.println("Raw JSON received: " + rawMessage);
+      
+      StaticJsonDocument<200> doc;
+      DeserializationError error = deserializeJson(doc, rawMessage);
+      
+      if (error) {
+          server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+          return;
+      }
+      
+      String receivedMessage = doc["message"] | "No message";
+      Serial.println("Parsed message: " + receivedMessage);
+      
+      StaticJsonDocument<200> responseDoc;
+      responseDoc["received"] = receivedMessage;
+      responseDoc["status"] = "ok";
+      
+      String response;
+      serializeJson(responseDoc, response);
+      server.send(200, "application/json", response);
+  } else {
+      server.send(400, "application/json", "{\"error\":\"No JSON received\"}");
+  }
+}
+
 void setup() {
   // Initialize GPIO pins
   pinMode(GPIO_FACT_LD, OUTPUT);
@@ -272,18 +319,33 @@ void setup() {
 
 #ifdef USE_ETHERNET
   // Initialize Ethernet
-  ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO,
-            ETH_PHY_POWER, ETH_CLK_MODE);
+  if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_POWER, ETH_CLK_MODE)) {
+    Serial.println("Ethernet initialization failed, something went wrong!!!!");
+    while (1) {
+      // infinite loop if initialization fails
+      digitalWrite(GPIO_FACT_LD, HIGH);
+    }
+  }
+  delay(200); // Add a short delay to allow PHY to settle
 #ifdef USE_STATIC_IP
   // Use the following to configure a static IP
+  // ex. ETH.config(local_ip, gateway, subnet, primary_dns, secondary_dns);
   ETH.config(IPAddress(192,168,1,100), IPAddress(192,168,1,1), IPAddress(255,255,255,0), 
             IPAddress(192,168,1,1), IPAddress(192,168,1,1));
 #else
   ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE); // Use DHCP
-#endif
+#endif // end of USE_STATIC_IP
   // Set up event handler for Ethernet events
   Network.onEvent(onEvent);
-#endif
+
+#ifdef USE_WEBSERVICE
+  server.on("/get", HTTP_GET, handleGet);
+  server.on("/post", HTTP_POST, handlePost);
+    
+  server.begin();
+  Serial.println("Web service is started."); 
+#endif // end of USE_WEBSERVICE
+#endif // end of USE_ETHERNET
 }
 
 void loop() {
@@ -301,5 +363,10 @@ void loop() {
   // Feed the watchdog (reset the timer)
   timerWrite(wdt_timer, 0);
   delay(1); // or some other short delay
+#endif
+
+#ifdef USE_WEBSERVICE
+  // Handle web server requests
+  server.handleClient();
 #endif
 }

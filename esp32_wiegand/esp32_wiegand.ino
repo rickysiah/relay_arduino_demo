@@ -84,7 +84,6 @@ hw_timer_t *wdt_timer = NULL; // Define the watchdog timer handle
 // Flag to track Ethernet connection status
 bool eth_connected = false;
 uint32_t chipId = 0;
-bool flgTimer = false;
 
 #ifdef USE_WATCHDOG
 void ARDUINO_ISR_ATTR resetModule() {
@@ -128,9 +127,7 @@ void ARDUINO_ISR_ATTR blinkLED() {
   // Give a semaphore that we can check in the loop
   xSemaphoreGiveFromISR(timerSemaphore, NULL);
   // It is safe to use digitalRead/Write here if you want to toggle an output
-  // digitalWrite(GPIO_FACT_LD, !digitalRead(GPIO_FACT_LD));
-  flgTimer = true;
-
+  digitalWrite(GPIO_FACT_LD, !digitalRead(GPIO_FACT_LD));
 }
 
 void init_timer(void) {
@@ -247,6 +244,11 @@ void GetMacAddress(void)
 }
 
 void setup() {
+  // Initialize GPIO pins
+  pinMode(GPIO_FACT_LD, OUTPUT);
+  pinMode(GPIO_RLY_CH1, OUTPUT);
+  pinMode(GPIO_RLY_CH2, OUTPUT);
+
   // Initialize serial communication
   Serial.begin(115200);
   delay(1000); /* wait serial ok */
@@ -300,21 +302,4 @@ void loop() {
   timerWrite(wdt_timer, 0);
   delay(1); // or some other short delay
 #endif
-  // put your main code here, to run repeatedly:
-  Serial.println("Test loop");
-  delay(1000);
-  if (flgTimer) {
-    Serial.println("Timer Reached");
-    if (ledToggle)
-    {
-      ledToggle = false;
-      digitalWrite(GPIO_RLY_CH1, HIGH);
-    }
-    else
-    {
-      ledToggle = true;
-      digitalWrite(GPIO_RLY_CH1, LOW);
-    }
-    flgTimer = false;
-  }
 }

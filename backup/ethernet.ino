@@ -110,6 +110,6 @@ void loop() {
   delay(1000); /* must give time to watchdog, otherwise crash */
 
   // put your main code here, to run repeatedly:
-  //Serial.println("loop");
+  Serial.println("loop");
   
 }

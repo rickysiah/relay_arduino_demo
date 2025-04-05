@@ -1,3 +1,42 @@
+/**
+  ******************************************************************************
+  * @file	: esp32_wiegand.ino
+  * @company	: Microcube Enterprise
+  * @author	: Ricky Siah
+  * @email	: myinfo.microcube@gmail.com
+  * @vers.	: V1.0.0
+  * @date	: 28-March-2025
+  * @brief	: ESP32 Wiegand Reader with Ethernet and Web Service
+  *			  
+  ******************************************************************************
+  * @attention
+  * Copyright (C) 2025 Microcube Enterprise
+  * All rights reserved.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+  * are met:
+  * 1. Redistributions of source code must retain the above copyright
+  *    notice, this list of conditions and the following disclaimer.
+  * 2. Redistributions in binary form must reproduce the above copyright
+  *    notice, this list of conditions and the following disclaimer in the
+  *    documentation and/or other materials provided with the distribution.
+  * 3. The name of the author may not be used to endorse or promote products
+  *    derived from this software without specific prior written permission.
+  *
+  * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+  * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+  * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+  * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+  * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+  * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+  * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  ******************************************************************************
+**/
+
 #include <ArduinoJson.h>
 #include <ETH.h>
 #include <WebServer.h>
@@ -49,6 +88,7 @@
 //////////wiegand input//////////
 #ifdef DT_2CH
   #define GPIO_FACT_LD  32
+  #define GPIO_FACT_BT  34
   #define GPIO_WIEG_D0  36
   #define GPIO_WIEG_D1  39
   #define GPIO_RLY_CH1  16
@@ -63,6 +103,8 @@
   #define GPIO_WIEG_D1  15
 #endif
 
+#define WIEGAND_BITS 32
+
 // ethernet pin define
 #define USE_ETHERNET                             // Add support for ethernet (+20k code)
 #define USE_STATIC_IP
@@ -74,8 +116,14 @@
   #define ETH_PHY_POWER       GPIO_RMII_PWR
   #define ETH_CLK_MODE        ETH_CLOCK_GPIO17_OUT
 
+  #define LOCAL_IP    "192.168.1.100"
+  #define GATEWAY_IP  "192.168.1.1"
+  #define NETMASK_IP  "255.255.255.0"
+  #define DNS_IP1     "8.8.8.8"
+  #define DNS_IP2     "8.8.4.4"
+
 // #define USE_WATCHDOG
-// #define USE_WIEGAND
+#define USE_WIEGAND
 #define USE_WEBSERVICE
 
 hw_timer_t *timer = NULL;  // Define the timer handle
@@ -86,6 +134,17 @@ hw_timer_t *wdt_timer = NULL; // Define the watchdog timer handle
 // Flag to track Ethernet connection status
 bool eth_connected = false;
 uint32_t chipId = 0;
+uint32_t wieCard[265];
+uint8_t produce = 0;
+uint8_t consume = 0;
+
+#ifdef USE_ETHERNET
+String localIP = LOCAL_IP;
+String gateway = GATEWAY_IP;
+String subnet = NETMASK_IP;
+String dns1 = DNS_IP1;
+String dns2 = DNS_IP2;
+#endif
 
 #ifdef USE_WEBSERVICE
 // create a server instance on port 80
@@ -108,21 +167,28 @@ void init_watchdog(void) {
 #endif
 
 #ifdef USE_WIEGAND
-// Wiegand variables
-volatile uint32_t wiegandCode = 0;
-volatile uint8_t wiegandBitCount = 0;
+// Variables to store Wiegand data
+unsigned long wiegandData = 0;
+unsigned long bitCount = 0;
+unsigned long lastPulseTime = 0;
+const unsigned long TIMEOUT = 2500; // Timeout in microseconds
 
 // Interrupt service routine for Wiegand D0
 void ARDUINO_ISR_ATTR wiegandD0ISR() {
-  wiegandCode <<= 1;
-  wiegandBitCount++;
+  lastPulseTime = micros();
+  if (bitCount < WIEGAND_BITS) {
+    wiegandData &= ~(1UL << (31 - bitCount)); // Clear the bit
+    bitCount++;
+  }
 }
 
 // Interrupt service routine for Wiegand D1
 void ARDUINO_ISR_ATTR wiegandD1ISR() {
-  wiegandCode <<= 1;
-  wiegandCode |= 1;
-  wiegandBitCount++;
+  lastPulseTime = micros();
+  if (bitCount < WIEGAND_BITS) {
+    wiegandData |= (1UL << (31 - bitCount)); // Set the bit
+    bitCount++;
+  }
 }
 #endif
 
@@ -251,12 +317,97 @@ void GetMacAddress(void)
   Serial.println(getInterfaceMacAddress(ESP_MAC_ETH));
 }
 
+#ifdef USE_ETHERNET
+void saveNetworkSettings(const String& ip, const String& gw, const String& sn, const String& d1, const String& d2) {
+  preferences.begin("network", false);
+  preferences.putString("ip", ip);
+  preferences.putString("gateway", gw);
+  preferences.putString("subnet", sn);
+  preferences.putString("dns1", d1);
+  preferences.putString("dns2", d2);
+  preferences.end();
+}
 
-void handleGet() {
+bool isValidIP(const String& ip) {
+  IPAddress temp;
+  return temp.fromString(ip);
+}
+
+void loadNetworkSettings() {
+  preferences.begin("network", true);
+  String ip = preferences.getString("ip", "");
+  String gw = preferences.getString("gateway", "");
+  String sn = preferences.getString("subnet", "");
+  String d1 = preferences.getString("dns1", "");
+  String d2 = preferences.getString("dns2", "");
+  preferences.end();
+
+  if (isValidIP(ip) && isValidIP(gw) && isValidIP(sn) && isValidIP(d1) && isValidIP(d2)) {
+      localIP = ip;
+      gateway = gw;
+      subnet = sn;
+      dns1 = d1;
+      dns2 = d2;
+  } else {
+    Serial.println("Use defaults and save them");
+      localIP = LOCAL_IP;
+      gateway = GATEWAY_IP;
+      subnet = NETMASK_IP;
+      dns1 = DNS_IP1;
+      dns2 = DNS_IP2;
+      saveNetworkSettings(localIP, gateway, subnet, dns1, dns2);
+  }
+}
+
+void factoryResetNetworkSettings() {
+  preferences.begin("network", false);
+  preferences.clear();
+  preferences.end();
+  Serial.println("Factory reset applied: Network settings cleared.");
+}
+
+void checkResetButton() {
+  pinMode(GPIO_FACT_BT, INPUT);
+  if (digitalRead(GPIO_FACT_BT) == LOW) {
+      Serial.println("Reset button pressed. Waiting 5 seconds...");
+      unsigned long pressStart = millis();
+      while (digitalRead(GPIO_FACT_BT) == LOW) {
+          if (millis() - pressStart >= 5000) {
+              factoryResetNetworkSettings();
+              break;
+          }
+      }
+  }
+}
+
+#ifdef USE_WEBSERVICE
+void handleGetNetwork() {
   StaticJsonDocument<200> doc;
-  doc["message"] = "Hello from ESP32";
-  doc["status"] = "success";
-  
+  doc["ip"] = localIP;
+  doc["gateway"] = gateway;
+  doc["subnet"] = subnet;
+  doc["dns1"] = dns1;
+  doc["dns2"] = dns2;
+
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+void handleGetWiegand() {
+  StaticJsonDocument<200> doc;
+  if(consume == produce) {
+    doc["cardid"] = "none";  // no more cards in the buffer
+    doc["consume"] = "none";
+    doc["produce"] = "none";
+  } 
+  else {
+    doc["cardid"] = wieCard[consume];
+    doc["consume"] = consume;
+    doc["produce"] = produce;
+    consume++;
+  }
+
   String response;
   serializeJson(doc, response);
   server.send(200, "application/json", response);
@@ -264,37 +415,45 @@ void handleGet() {
 
 void handlePost() {
   if (server.hasArg("plain")) {
-      String rawMessage = server.arg("plain");
-      Serial.println("Raw JSON received: " + rawMessage);
-      
-      StaticJsonDocument<200> doc;
-      DeserializationError error = deserializeJson(doc, rawMessage);
-      
-      if (error) {
-          server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-          return;
-      }
-      
-      String receivedMessage = doc["message"] | "No message";
-      Serial.println("Parsed message: " + receivedMessage);
-      
-      StaticJsonDocument<200> responseDoc;
-      responseDoc["received"] = receivedMessage;
-      responseDoc["status"] = "ok";
-      
-      String response;
-      serializeJson(responseDoc, response);
-      server.send(200, "application/json", response);
+    String rawMessage = server.arg("plain");
+    Serial.println("Raw JSON received: " + rawMessage);
+
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, rawMessage);
+
+    if (error) {
+        server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    String receivedMessage = doc["message"] | "No message";
+    Serial.println("Parsed message: " + receivedMessage);
+
+    // Optional: handle network settings update from JSON
+    if (doc.containsKey("ip") && doc.containsKey("gateway") && doc.containsKey("subnet") && doc.containsKey("dns1") && doc.containsKey("dns2")) {
+      saveNetworkSettings(doc["ip"].as<String>(), doc["gateway"].as<String>(), doc["subnet"].as<String>(), doc["dns1"].as<String>(), doc["dns2"].as<String>());
+    }
+
+    StaticJsonDocument<200> responseDoc;
+    responseDoc["received"] = receivedMessage;
+    responseDoc["status"] = "ok";
+
+    String response;
+    serializeJson(responseDoc, response);
+    server.send(200, "application/json", response);
   } else {
       server.send(400, "application/json", "{\"error\":\"No JSON received\"}");
   }
 }
+#endif // end of USE_WEBSERVICE
+#endif // end of USE_ETHERNET
 
 void setup() {
   // Initialize GPIO pins
   pinMode(GPIO_FACT_LD, OUTPUT);
   pinMode(GPIO_RLY_CH1, OUTPUT);
   pinMode(GPIO_RLY_CH2, OUTPUT);
+  pinMode(GPIO_FACT_BT, INPUT);
 
   // Initialize serial communication
   Serial.begin(115200);
@@ -307,8 +466,9 @@ void setup() {
   // Initialize Wiegand pins
   pinMode(GPIO_WIEG_D0, INPUT);
   pinMode(GPIO_WIEG_D1, INPUT);
-  attachInterrupt(GPIO_WIEG_D0, wiegandD0ISR, FALLING);
-  attachInterrupt(GPIO_WIEG_D1, wiegandD1ISR, FALLING);
+
+  attachInterrupt(digitalPinToInterrupt(GPIO_WIEG_D0), wiegandD0ISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(GPIO_WIEG_D1), wiegandD1ISR, FALLING);
 #endif
 
   init_timer();
@@ -318,7 +478,7 @@ void setup() {
 #endif
 
 #ifdef USE_ETHERNET
-  // Initialize Ethernet
+  Serial.println("Initializing Ethernet...");
   if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_MDC, ETH_PHY_MDIO, ETH_PHY_POWER, ETH_CLK_MODE)) {
     Serial.println("Ethernet initialization failed, something went wrong!!!!");
     while (1) {
@@ -328,18 +488,44 @@ void setup() {
   }
   delay(200); // Add a short delay to allow PHY to settle
 #ifdef USE_STATIC_IP
+  checkResetButton();
+  loadNetworkSettings();
+  IPAddress ip, gw, sn, d1, d2;
+  ip.fromString(localIP);
+  gw.fromString(gateway);
+  sn.fromString(subnet);
+  d1.fromString(dns1);
+  d2.fromString(dns2);
   // Use the following to configure a static IP
   // ex. ETH.config(local_ip, gateway, subnet, primary_dns, secondary_dns);
-  ETH.config(IPAddress(192,168,1,100), IPAddress(192,168,1,1), IPAddress(255,255,255,0), 
-            IPAddress(192,168,1,1), IPAddress(192,168,1,1));
+  ETH.config(ip, gw, sn, d1, d2);
+  Serial.println("*** Static Network: ");
+  Serial.print("LocalIP: ");
+  Serial.println(ETH.localIP());
+  Serial.print("Gateway: ");
+  Serial.println(gw);
+  Serial.print("Subnet: ");
+  Serial.println(sn);
+  Serial.print("DNS1: ");
+  Serial.println(d1);
+  Serial.print("DNS2: ");
+  Serial.println(d2);
 #else
   ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE); // Use DHCP
-#endif // end of USE_STATIC_IP
+  while (ETH.localIP() == INADDR_NONE) {
+      delay(100);
+  }
+  Serial.print("*** DHCP network resolved: ");
+  Serial.print("IP Address: ");
+  Serial.println(ETH.localIP());
+#endif   // end of USE_STATIC_IP
+  
   // Set up event handler for Ethernet events
   Network.onEvent(onEvent);
 
 #ifdef USE_WEBSERVICE
-  server.on("/get", HTTP_GET, handleGet);
+  server.on("/get/network", HTTP_GET, handleGetNetwork);
+  server.on("/get/wiegand", HTTP_GET, handleGetWiegand);
   server.on("/post", HTTP_POST, handlePost);
     
   server.begin();
@@ -349,14 +535,26 @@ void setup() {
 }
 
 void loop() {
-  static bool ledToggle = true;
+
 #ifdef USE_WIEGAND
-  // Check for Wiegand code
-  if (wiegandBitCount >= 26) {
-    Serial.println("Wiegand code: " + String(wiegandCode));
-    wiegandCode = 0;
-    wiegandBitCount = 0;
-  }
+if (bitCount == WIEGAND_BITS) {
+  Serial.print("Wiegand Data: ");
+  Serial.print(wiegandData, Dec);
+  Serial.print(" (");
+  Serial.print(wiegandData, BIN);
+  Serial.print(")");
+
+  wieCard[produce] = wiegandData;
+  produce++;
+
+  bitCount = 0;
+  wiegandData = 0;
+} else if (bitCount > 0 && (micros() - lastPulseTime > TIMEOUT)) {
+  // Timeout, reset
+  Serial.println("Wiegand Timeout, Resetting");
+  bitCount = 0;
+  wiegandData = 0;
+}
 #endif
 
 #ifdef USE_WATCHDOG
@@ -369,4 +567,5 @@ void loop() {
   // Handle web server requests
   server.handleClient();
 #endif
+  delayMicroseconds(100); // Small delay to prevent excessive CPU usage
 }
